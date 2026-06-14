@@ -1,0 +1,43 @@
+[package]
+name = "hex_guard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# for work with coding and unicode
+unicode-normalization = "0.1.25"
+unicode_skeleton = "0.1.1"
+# for quick search of pattersn in bytes
+memchr = "2.7"
+# for logging and tests
+log = "0.4.29"
+env_logger = "0.11.10"
+
+reqwest = { version = "0.13.3", features = ["rustls", "json"] }
+tokio = { version = "1.52.3", features = ["full"] }
+url = "2.5.8" # url parsing
+
+rand = "0.10.1"
+
+serde_json = "1.0"
+anyhow = "1"
+idna = "1.1.0"
+unicode-segmentation = "1.13.2"
+regex = "1.12.3"
+lru = "0.18.0"
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = "0.1"
+
+# config
+toml = "0.9"
+
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+futures = "0.3"

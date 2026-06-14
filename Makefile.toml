@@ -1,0 +1,41 @@
+[config]
+skip_core_tasks = true
+
+[tasks.check]
+description = "Быстрая проверка компиляции"
+command = "cargo"
+args = ["check"]
+
+[tasks.test]
+description = "Запуск юнит-тестов"
+command = "cargo"
+args = ["test"]
+
+[tasks.clippy]
+description = "Глубокий статический анализ кода"
+command = "cargo"
+args = ["clippy", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.miri]
+description = "Проверка на Undefined Behavior через Miri"
+script = [
+    "rustup component add miri --toolchain nightly",
+    "cargo +nightly miri test"
+]
+
+[tasks.clean]
+description = "Очистка артефактов сборки"
+command = "cargo"
+args = ["clean"]
+
+[tasks.run]
+description = "Запуск проекта"
+command = "cargo"
+args = ["run"]
+
+# Таска по умолчанию (запускается при вызове `cargo make`)
+[tasks.default]
+alias = "all"
+
+[tasks.all]
+dependencies = ["check", "test", "clippy"]
