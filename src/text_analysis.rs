@@ -14,6 +14,12 @@ pub enum DangerZone {
     UrlMismatch,
     ObfuscatedUrl,
     Clear,
+    ButtonUrl,
+    EntityUrl,
+    UrlShortener,
+    SuspiciousTld,
+    IpInsteadOfDomain,
+    SenderBioSuspicious,
 }
 
 pub struct AnalysisResult {

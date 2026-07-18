@@ -17,6 +17,7 @@ Python Listener (MTProto)  →  gRPC  →  Rust Analyzer  →  Telegram Bot API 
 - **Rust** (stable, edition 2024)
 - **Python 3.12+** (built-in `tomllib`)
 - Telegram bot token (create via [@BotFather](https://t.me/BotFather))
+- Telegram API credentials (get at https://my.telegram.org)
 - Telegram user account for MTProto listener
 
 ## Setup
@@ -57,6 +58,8 @@ nano python/config.toml
 ```toml
 [listener]
 phone = "+79001234567"
+api_id = 123456
+api_hash = "your_api_hash_here"
 session_dir = "session"
 
 [filter]
@@ -84,7 +87,9 @@ python listener.py
 First run will:
 1. Generate gRPC stubs automatically
 2. Create Telethon session in `python/session/`
-3. Prompt for 2FA code if enabled
+3. Prompt for SMS code and 2FA password if needed
+
+If login fails, delete `python/session/` and retry.
 
 ## Configuration
 

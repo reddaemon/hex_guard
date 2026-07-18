@@ -4,9 +4,15 @@ import logging
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from telethon import TelegramClient, events
+from telethon.tl.types import (
+    MessageEntityURL,
+    MessageEntityMention,
+    MessageButtonURL,
+)
 
 import grpc
 
@@ -51,13 +57,62 @@ def load_config() -> dict:
 
 class GracefulShutdown:
     def __init__(self):
-        self._event = signal.Event()
+        self._event = threading.Event()
 
     def set(self):
         self._event.set()
 
     def wait(self):
         self._event.wait()
+
+
+def extract_button_urls(message):
+    """Extract URLs from inline button rows."""
+    urls = []
+    if not message.buttons:
+        return urls
+    for row in message.buttons:
+        for btn in row:
+            if isinstance(btn, MessageButtonURL):
+                urls.append(btn.url)
+    return urls
+
+
+def extract_entity_urls(message):
+    """Extract URLs from auto-link entities in text."""
+    urls = []
+    if not message.entities:
+        return urls
+    for entity in message.entities:
+        if isinstance(entity, MessageEntityURL):
+            urls.append(entity.url)
+    return urls
+
+
+def extract_mentions(message):
+    """Extract @username mentions from text using entity offsets."""
+    mentions = []
+    if not message.entities or not message.text:
+        return mentions
+    for entity in message.entities:
+        if isinstance(entity, MessageEntityMention):
+            start = entity.offset
+            end = start + entity.length
+            if 0 <= start < len(message.text) and end <= len(message.text):
+                mention = message.text[start:end]
+                mentions.append(mention)
+    return mentions
+
+
+async def fetch_sender_bio(client, sender_id):
+    """Fetch sender's bio with timeout."""
+    try:
+        user = await client.get_entity(sender_id)
+        if hasattr(user, "bio") and user.bio:
+            return user.bio
+    except Exception as e:
+        log.debug(f"Could not fetch sender bio: {e}")
+    return ""
 
 
 def main():
@@ -73,12 +128,17 @@ def main():
     config = load_config()
 
     phone = config["listener"]["phone"]
+    api_id = config["listener"]["api_id"]
+    api_hash = config["listener"]["api_hash"]
     session_dir = config["listener"]["session_dir"]
     blacklist = set(config["filter"]["blacklist_chats"])
     grpc_addr = config["grpc"]["server_addr"]
 
     if not phone:
         log.error("phone not set in config.toml")
+        sys.exit(1)
+    if not api_id or not api_hash:
+        log.error("api_id and api_hash must be set in config.toml")
         sys.exit(1)
 
     session_path = _SCRIPT_DIR / session_dir
@@ -95,7 +155,7 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    client = TelegramClient(session_path / "hex_guard_session", api_id=0, api_hash="")
+    client = TelegramClient(session_path / "hex_guard_session", api_id, api_hash)
 
     @client.on(events.NewMessage())
     async def handler(event):
@@ -108,9 +168,19 @@ def main():
         sender_id = event.sender_id if event.sender else 0
         sender_name = event.sender.first_name if event.sender else "Unknown"
 
+        button_urls = extract_button_urls(event.message)
+        entity_urls = extract_entity_urls(event.message)
+        mentions = extract_mentions(event.message)
+
         log.debug(
-            f"Analyzing: chat={chat_id}, sender={sender_name}, text={text[:100]}"
+            f"Analyzing: chat={chat_id}, sender={sender_name}, "
+            f"buttons={len(button_urls)}, entities={len(entity_urls)}, "
+            f"text={text[:100]}"
         )
+
+        sender_bio = ""
+        if sender_id:
+            sender_bio = await fetch_sender_bio(client, sender_id)
 
         try:
             msg = hex_guard_pb2.Message(
@@ -118,6 +188,10 @@ def main():
                 text=text,
                 sender_id=sender_id,
                 sender_name=sender_name,
+                button_urls=button_urls,
+                entity_urls=entity_urls,
+                mentions=mentions,
+                sender_bio=sender_bio,
             )
             result = stub.AnalyzeMessage(msg)
             if result.score > 0 or result.zones:
@@ -128,6 +202,11 @@ def main():
             log.error(f"gRPC error: {e}")
 
     log.info("Starting Telethon listener, connecting to Telegram...")
+    client.connect()
+    if not client.is_user_authorized():
+        log.info("Not authorized. Starting login flow...")
+    else:
+        log.info("Already authorized, skipping login")
     client.start(phone=phone)
     log.info("Connected. Listening for messages...")
 

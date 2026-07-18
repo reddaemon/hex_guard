@@ -1,6 +1,7 @@
 use crate::heuristics::HeuristicEngine;
 use crate::hidden_links::{HiddenLinkDetector, HiddenLinkType};
 use crate::text_analysis::DangerZone;
+use crate::url_analyzer::UrlAnalyzer;
 
 use lru::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -14,40 +15,47 @@ pub struct SafetyReport {
     pub final_url: Option<String>,
 }
 
-#[allow(async_fn_in_trait)]
-pub trait UrlTracer: Send + Sync {
-    async fn trace_url(&self, url: &str) -> Result<SafetyReport, String>;
+#[derive(Debug, Clone)]
+pub struct MessageContext {
+    pub text: String,
+    pub button_urls: Vec<String>,
+    pub entity_urls: Vec<String>,
+    pub mentions: Vec<String>,
+    pub sender_bio: String,
 }
 
-pub struct HexGuard<T: UrlTracer> {
+pub struct HexGuard {
     heuristics: HeuristicEngine,
     hidden_links: HiddenLinkDetector,
+    url_analyzer: UrlAnalyzer,
     cache: Mutex<LruCache<u64, SafetyReport>>,
-    tracer: T,
 }
 
-impl<T: UrlTracer> HexGuard<T> {
-    pub fn new(capacity: usize, heuristics: HeuristicEngine, hidden_links: HiddenLinkDetector, tracer: T) -> Self {
+impl HexGuard {
+    pub fn new(capacity: usize, heuristics: HeuristicEngine, hidden_links: HiddenLinkDetector) -> Self {
         Self {
             heuristics,
             hidden_links,
+            url_analyzer: UrlAnalyzer::new(),
             cache: Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(capacity).unwrap(),
             )),
-            tracer,
         }
     }
 
-    fn calculate_hash(&self, data: &[u8]) -> u64 {
+    fn calculate_hash(&self, ctx: &MessageContext) -> u64 {
         let mut hasher = DefaultHasher::new();
-        hasher.write(data);
+        hasher.write(ctx.text.as_bytes());
+        hasher.write(ctx.button_urls.join("\0").as_bytes());
+        hasher.write(ctx.entity_urls.join("\0").as_bytes());
+        hasher.write(ctx.sender_bio.as_bytes());
         hasher.finish()
     }
 
-    pub async fn full_inspect(&self, raw_data: &[u8]) -> SafetyReport {
-        let data_hash = self.calculate_hash(raw_data);
+    pub async fn analyze(&self, ctx: &MessageContext) -> SafetyReport {
+        let data_hash = self.calculate_hash(ctx);
 
-        // 1. Быстрый чек кэша
+        // 1. Quick cache check
         {
             let mut cache_lock = self.cache.lock().await;
             if let Some(cached_report) = cache_lock.get(&data_hash) {
@@ -55,18 +63,30 @@ impl<T: UrlTracer> HexGuard<T> {
             }
         }
 
-        // 2. Локальный анализ через HeuristicEngine
-        let text_content = std::str::from_utf8(raw_data).unwrap_or("");
-        let heuristic_score = self.heuristics.check_text(text_content);
+        let mut score: u8 = 0;
+        let mut zones: Vec<DangerZone> = Vec::new();
+        let mut has_soft_pattern = false;
 
-        // 2.5. Детекция скрытых ссылок
-        let hidden_links = self.hidden_links.detect(text_content);
-        let mut hidden_score: u8 = 0;
-        let mut hidden_zones: Vec<DangerZone> = Vec::new();
+        // 2. Heuristic check on text
+        let (text_score, text_has_soft) = self.heuristics.check_text(&ctx.text);
+        score = (score + text_score).min(100);
+        has_soft_pattern = has_soft_pattern || text_has_soft;
 
+        // 2.5. Heuristic check on sender bio
+        if !ctx.sender_bio.is_empty() {
+            let (bio_score, bio_has_soft) = self.heuristics.check_text(&ctx.sender_bio);
+            score = (score + bio_score).min(100);
+            has_soft_pattern = has_soft_pattern || bio_has_soft;
+            if bio_score > 0 {
+                zones.push(DangerZone::SenderBioSuspicious);
+            }
+        }
+
+        // 3. Hidden link detection in text
+        let hidden_links = self.hidden_links.detect(&ctx.text);
         for link in &hidden_links {
-            hidden_score = (hidden_score + link.risk_level).min(100);
-            hidden_zones.push(match link.link_type {
+            score = (score + link.risk_level).min(100);
+            zones.push(match link.link_type {
                 HiddenLinkType::ZeroWidthChars => DangerZone::ZeroWidthChars,
                 HiddenLinkType::InvisibleUrl => DangerZone::InvisibleUrl,
                 HiddenLinkType::HomographUrl => DangerZone::Homograph,
@@ -77,22 +97,53 @@ impl<T: UrlTracer> HexGuard<T> {
             });
         }
 
-        let mut report = SafetyReport {
-            score: (heuristic_score + hidden_score).min(100),
-            zones: hidden_zones,
-            final_url: None,
-        };
+        // 4. Button URL scoring (+40 each)
+        for btn_url in &ctx.button_urls {
+            score = (score + 40).min(100);
+            zones.push(DangerZone::ButtonUrl);
 
-        // 3. Вызов внешней трассировки через абстрактный tracer
-        if !text_content.is_empty() {
-            if let Ok(network_report) = self.tracer.trace_url(text_content).await {
-                report.score = std::cmp::max(report.score, network_report.score);
-                report.zones.extend(network_report.zones);
-                report.final_url = network_report.final_url;
+            // Dry analysis of button URL
+            let (url_score, url_findings) = self.url_analyzer.analyze(btn_url);
+            score = (score + url_score).min(100);
+            for finding in &url_findings {
+                match finding.as_str() {
+                    "UrlShortener" => zones.push(DangerZone::UrlShortener),
+                    "SuspiciousTld" => zones.push(DangerZone::SuspiciousTld),
+                    "IpInsteadOfDomain" => zones.push(DangerZone::IpInsteadOfDomain),
+                    _ => {}
+                }
             }
         }
 
-        // 4. Пишем итоговый отчет в кэш
+        // 5. Entity URL scoring (+20 each)
+        for entity_url in &ctx.entity_urls {
+            score = (score + 20).min(100);
+            zones.push(DangerZone::EntityUrl);
+
+            let (url_score, url_findings) = self.url_analyzer.analyze(entity_url);
+            score = (score + url_score).min(100);
+            for finding in &url_findings {
+                match finding.as_str() {
+                    "UrlShortener" => zones.push(DangerZone::UrlShortener),
+                    "SuspiciousTld" => zones.push(DangerZone::SuspiciousTld),
+                    "IpInsteadOfDomain" => zones.push(DangerZone::IpInsteadOfDomain),
+                    _ => {}
+                }
+            }
+        }
+
+        // 6. Soft pattern + button bonus (+10)
+        if has_soft_pattern && !ctx.button_urls.is_empty() {
+            score = (score + 10).min(100);
+        }
+
+        let report = SafetyReport {
+            score,
+            zones,
+            final_url: None,
+        };
+
+        // 7. Cache result
         {
             let mut cache_lock = self.cache.lock().await;
             cache_lock.put(data_hash, report.clone());

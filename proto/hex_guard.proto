@@ -11,6 +11,10 @@ message Message {
   string text = 2;
   int64 sender_id = 3;
   string sender_name = 4;
+  repeated string button_urls = 5;
+  repeated string entity_urls = 6;
+  repeated string mentions = 7;
+  string sender_bio = 8;
 }
 
 message AnalysisResult {

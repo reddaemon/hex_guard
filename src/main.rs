@@ -3,7 +3,7 @@ mod grpc;
 use hex_guard::HeuristicEngine;
 use hex_guard::HexGuard;
 use hex_guard::HiddenLinkDetector;
-use hex_guard::NetworkChecker;
+use hex_guard::MessageContext;
 use hex_guard::SafetyReport;
 use grpc::AnalyzeRequest;
 use std::collections::HashSet;
@@ -12,92 +12,121 @@ use tokio::sync::mpsc;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize)]
 struct Config {
-    bot_token: String,
+    #[serde(default = "default_bot")]
+    bot: BotConfig,
+    #[serde(default = "default_analysis")]
+    analysis: AnalysisConfig,
+    #[serde(default = "default_filter")]
+    filter: FilterConfig,
+    #[serde(default = "default_grpc")]
+    grpc: GrpcConfig,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BotConfig {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
     alert_chat_id: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AnalysisConfig {
+    #[serde(default = "default_threshold")]
     alert_threshold: u8,
+    #[serde(default = "default_queue_size")]
     queue_size: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FilterConfig {
+    #[serde(default)]
     blacklist_chats: HashSet<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GrpcConfig {
+    #[serde(default = "default_listen_addr")]
     listen_addr: String,
+}
+
+fn default_bot() -> BotConfig {
+    BotConfig {
+        token: String::new(),
+        alert_chat_id: 0,
+    }
+}
+
+fn default_analysis() -> AnalysisConfig {
+    AnalysisConfig {
+        alert_threshold: 50,
+        queue_size: 1000,
+    }
+}
+
+fn default_filter() -> FilterConfig {
+    FilterConfig {
+        blacklist_chats: HashSet::new(),
+    }
+}
+
+fn default_grpc() -> GrpcConfig {
+    GrpcConfig {
+        listen_addr: "127.0.0.1:50051".into(),
+    }
+}
+
+fn default_threshold() -> u8 {
+    50
+}
+
+fn default_queue_size() -> usize {
+    1000
+}
+
+fn default_listen_addr() -> String {
+    "127.0.0.1:50051".into()
 }
 
 impl Config {
     fn load() -> anyhow::Result<Self> {
         let config_str = std::fs::read_to_string("config.toml")?;
-        let config: toml::Value = config_str.parse()?;
-
-        Ok(Self {
-            bot_token: config
-                .get("bot")
-                .and_then(|b| b.get("token"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            alert_chat_id: config
-                .get("bot")
-                .and_then(|b| b.get("alert_chat_id"))
-                .and_then(|c| c.as_integer())
-                .unwrap_or(0),
-            alert_threshold: config
-                .get("analysis")
-                .and_then(|a| a.get("alert_threshold"))
-                .and_then(|t| t.as_integer())
-                .map(|t| t as u8)
-                .unwrap_or(50),
-            queue_size: config
-                .get("analysis")
-                .and_then(|a| a.get("queue_size"))
-                .and_then(|q| q.as_integer())
-                .map(|q| q as usize)
-                .unwrap_or(1000),
-            blacklist_chats: config
-                .get("filter")
-                .and_then(|f| f.get("blacklist_chats"))
-                .and_then(|b| b.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_integer())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            listen_addr: config
-                .get("grpc")
-                .and_then(|g| g.get("listen_addr"))
-                .and_then(|a| a.as_str())
-                .unwrap_or("127.0.0.1:50051")
-                .to_string(),
-        })
+        Ok(toml::from_str(&config_str)?)
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("debug"),
+    ).init();
 
     let config = Config::load()?;
-    log::info!("HexGuard gRPC daemon starting on {}", config.listen_addr);
+    log::info!("HexGuard gRPC daemon starting on {}", config.grpc.listen_addr);
     log::info!(
         "Alert threshold: {}, Queue size: {}, Blacklist: {} chats",
-        config.alert_threshold,
-        config.queue_size,
-        config.blacklist_chats.len()
+        config.analysis.alert_threshold,
+        config.analysis.queue_size,
+        config.filter.blacklist_chats.len()
     );
 
-    let tracer = NetworkChecker::new();
     let guard = Arc::new(HexGuard::new(
-        config.queue_size,
+        config.analysis.queue_size,
         HeuristicEngine::new(),
         HiddenLinkDetector::new(),
-        tracer,
     ));
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("Failed to build client");
 
-    let (tx, rx) = mpsc::channel::<AnalyzeRequest>(config.queue_size);
+    let (tx, rx) = mpsc::channel::<AnalyzeRequest>(config.analysis.queue_size);
     let server = grpc::create_server(tx);
 
-    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    log::info!("gRPC server listening on {}", config.listen_addr);
+    let listener = tokio::net::TcpListener::bind(&config.grpc.listen_addr).await?;
+    log::info!("gRPC server listening on {}", config.grpc.listen_addr);
 
     let server_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -106,10 +135,10 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
-    let blacklist = config.blacklist_chats;
-    let threshold = config.alert_threshold;
-    let bot_token = config.bot_token.clone();
-    let alert_chat_id = config.alert_chat_id;
+    let blacklist = config.filter.blacklist_chats;
+    let threshold = config.analysis.alert_threshold;
+    let bot_token = config.bot.token.clone();
+    let alert_chat_id = config.bot.alert_chat_id;
     let worker_handle = tokio::spawn(async move {
         process_messages(rx, guard, client, blacklist, threshold, bot_token, alert_chat_id).await
     });
@@ -139,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn process_messages(
     mut rx: mpsc::Receiver<AnalyzeRequest>,
-    guard: Arc<HexGuard<NetworkChecker>>,
+    guard: Arc<HexGuard>,
     client: reqwest::Client,
     blacklist: HashSet<i64>,
     threshold: u8,
@@ -152,14 +181,31 @@ async fn process_messages(
             continue;
         }
 
-        log::debug!(
-            "Analyzing: chat={}, sender={}, text={}",
+        log::info!(
+            "Analyzing: chat={}, sender={}, buttons={}, entities={}, text={}",
             req.chat_id,
             req.sender_name,
-            &req.text[..req.text.len().min(100)]
+            req.button_urls.len(),
+            req.entity_urls.len(),
+            &req.text.chars().take(100).collect::<String>()
         );
 
-        let report = guard.full_inspect(req.text.as_bytes()).await;
+        let ctx = MessageContext {
+            text: req.text.clone(),
+            button_urls: req.button_urls.clone(),
+            entity_urls: req.entity_urls.clone(),
+            mentions: req.mentions.clone(),
+            sender_bio: req.sender_bio.clone(),
+        };
+
+        let report = guard.analyze(&ctx).await;
+
+        log::info!(
+            "Result: score={}, zones={:?}, chat={}",
+            report.score,
+            report.zones,
+            req.chat_id
+        );
 
         if report.score >= threshold || !report.zones.is_empty() {
             log::info!(
@@ -187,13 +233,26 @@ async fn send_alert(
     let score = report.score;
     let zones: Vec<String> = report.zones.iter().map(|z| format!("{:?}", z)).collect();
 
+    let button_info = if req.button_urls.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n  Buttons: {}",
+            req.button_urls
+                .iter()
+                .map(|u| u.chars().take(60).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
     let alert_text = if score >= 80 {
         format!(
             "🚨 CRITICAL THREAT\n\
              Score: {} / 100\n\
              Zones: {}\n\
              Chat: {} (@{})\n\
-             Sender: {} (ID: {})\n\
+             Sender: {} (ID: {}){}\n\
              Text: {}",
             score,
             zones.join(", "),
@@ -201,6 +260,7 @@ async fn send_alert(
             req.chat_id,
             req.sender_name,
             req.sender_id,
+            button_info,
             req.text.chars().take(200).collect::<String>()
         )
     } else if score >= 50 {
@@ -209,7 +269,7 @@ async fn send_alert(
              Score: {} / 100\n\
              Zones: {}\n\
              Chat: {} (@{})\n\
-             Sender: {} (ID: {})\n\
+             Sender: {} (ID: {}){}\n\
              Text: {}",
             score,
             zones.join(", "),
@@ -217,6 +277,7 @@ async fn send_alert(
             req.chat_id,
             req.sender_name,
             req.sender_id,
+            button_info,
             req.text.chars().take(200).collect::<String>()
         )
     } else {
@@ -225,13 +286,14 @@ async fn send_alert(
              Score: {} / 100\n\
              Zones: {}\n\
              Chat: {} (@{})\n\
-             Sender: {} (ID: {})",
+             Sender: {} (ID: {}){}",
             score,
             zones.join(", "),
             req.chat_id,
             req.chat_id,
             req.sender_name,
-            req.sender_id
+            req.sender_id,
+            button_info
         )
     };
 

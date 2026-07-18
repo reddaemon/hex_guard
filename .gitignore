@@ -2,3 +2,6 @@
 /python/session/
 /python/hex_guard_pb2.py
 /python/hex_guard_pb2_grpc.py
+*.toml
+/python/*.toml
+/python/__pycache__/
