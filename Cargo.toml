@@ -33,6 +33,7 @@ tokio-stream = "0.1"
 # config
 toml = "0.9"
 
+thiserror = "2"
 
 [build-dependencies]
 tonic-build = "0.12"

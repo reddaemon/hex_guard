@@ -2,6 +2,12 @@ use url::Url;
 
 pub struct UrlAnalyzer;
 
+impl Default for UrlAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UrlAnalyzer {
     pub fn new() -> Self {
         Self
@@ -30,9 +36,21 @@ impl UrlAnalyzer {
 
         // URL shorteners
         let shorteners = [
-            "bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd",
-            "ow.ly", "buff.ly", "adf.ly", "lnk.to", "short.link",
-            "cutt.ly", "cli.gs", "tr.im", "j.mp", "su.pr",
+            "bit.ly",
+            "tinyurl.com",
+            "t.co",
+            "goo.gl",
+            "is.gd",
+            "ow.ly",
+            "buff.ly",
+            "adf.ly",
+            "lnk.to",
+            "short.link",
+            "cutt.ly",
+            "cli.gs",
+            "tr.im",
+            "j.mp",
+            "su.pr",
         ];
         for s in &shorteners {
             if host_lower == *s || host_lower.ends_with(&format!(".{}", s)) {
@@ -44,9 +62,21 @@ impl UrlAnalyzer {
 
         // Suspicious TLD
         let suspicious_tlds = [
-            ".xyz", ".top", ".club", ".work", ".site",
-            ".online", ".bid", ".win", ".date", ".stream",
-            ".download", ".rsvp", ".science", ".faith", ".loan",
+            ".xyz",
+            ".top",
+            ".club",
+            ".work",
+            ".site",
+            ".online",
+            ".bid",
+            ".win",
+            ".date",
+            ".stream",
+            ".download",
+            ".rsvp",
+            ".science",
+            ".faith",
+            ".loan",
         ];
         let domain_lower = host_lower.to_lowercase();
         for tld in &suspicious_tlds {

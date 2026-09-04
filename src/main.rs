@@ -1,11 +1,11 @@
 mod grpc;
 
+use grpc::AnalyzeRequest;
 use hex_guard::HeuristicEngine;
 use hex_guard::HexGuard;
 use hex_guard::HiddenLinkDetector;
 use hex_guard::MessageContext;
 use hex_guard::SafetyReport;
-use grpc::AnalyzeRequest;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -99,12 +99,13 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("debug"),
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
     let config = Config::load()?;
-    log::info!("HexGuard gRPC daemon starting on {}", config.grpc.listen_addr);
+    log::info!(
+        "HexGuard gRPC daemon starting on {}",
+        config.grpc.listen_addr
+    );
     log::info!(
         "Alert threshold: {}, Queue size: {}, Blacklist: {} chats",
         config.analysis.alert_threshold,
@@ -116,7 +117,8 @@ async fn main() -> anyhow::Result<()> {
         config.analysis.queue_size,
         HeuristicEngine::new(),
         HiddenLinkDetector::new(),
-    ));
+    )?);
+
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
@@ -140,7 +142,16 @@ async fn main() -> anyhow::Result<()> {
     let bot_token = config.bot.token.clone();
     let alert_chat_id = config.bot.alert_chat_id;
     let worker_handle = tokio::spawn(async move {
-        process_messages(rx, guard, client, blacklist, threshold, bot_token, alert_chat_id).await
+        process_messages(
+            rx,
+            guard,
+            client,
+            blacklist,
+            threshold,
+            bot_token,
+            alert_chat_id,
+        )
+        .await
     });
 
     let shutdown = tokio::signal::ctrl_c();
@@ -187,7 +198,7 @@ async fn process_messages(
             req.sender_name,
             req.button_urls.len(),
             req.entity_urls.len(),
-            &req.text.chars().take(100).collect::<String>()
+            req.text.chars().take(100).collect::<String>()
         );
 
         let ctx = MessageContext {

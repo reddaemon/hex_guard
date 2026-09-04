@@ -1,5 +1,5 @@
 use hex_guard::pb::hex_guard_server::HexGuard;
-use hex_guard::pb::{Message, AnalysisResult};
+use hex_guard::pb::{AnalysisResult, Message};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -39,7 +39,7 @@ impl HexGuard for HexGuardService {
             msg.sender_name,
             msg.button_urls.len(),
             msg.entity_urls.len(),
-            &msg.text.chars().take(100).collect::<String>()
+            msg.text.chars().take(100).collect::<String>()
         );
         let req = AnalyzeRequest {
             chat_id: msg.chat_id,

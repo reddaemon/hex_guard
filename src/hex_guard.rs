@@ -6,6 +6,7 @@ use crate::url_analyzer::UrlAnalyzer;
 use lru::LruCache;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
+use std::num::NonZeroUsize;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -31,16 +32,28 @@ pub struct HexGuard {
     cache: Mutex<LruCache<u64, SafetyReport>>,
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum HexGuardError {
+    #[error("Cache size must be > 0")]
+    InvalidCacheSize,
+}
+
 impl HexGuard {
-    pub fn new(capacity: usize, heuristics: HeuristicEngine, hidden_links: HiddenLinkDetector) -> Self {
-        Self {
+    pub fn new(
+        capacity: usize,
+        heuristics: HeuristicEngine,
+        hidden_links: HiddenLinkDetector,
+    ) -> Result<Self, HexGuardError> {
+        let cap = NonZeroUsize::new(capacity).ok_or(HexGuardError::InvalidCacheSize)?;
+
+        Ok(Self {
             heuristics,
             hidden_links,
             url_analyzer: UrlAnalyzer::new(),
-            cache: Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(capacity).unwrap(),
-            )),
-        }
+            cache: Mutex::new(LruCache::new(cap)),
+        })
     }
 
     fn calculate_hash(&self, ctx: &MessageContext) -> u64 {
